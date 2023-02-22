@@ -1,110 +1,93 @@
-#include <Arduino.h>
-#include "esp32-hal-gpio.h"
 #include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_MCP4725.h>
 
-// PIN DEFINITIONS
-#define PIN_I1 15
-#define PIN_Q1 2
-
-#define VCOT_PIN 25
-#define EN_PIN 35
-#define SS_PIN 5
-
-#define V_REF 3.3
-#define V_OUT_MAX 3
-#define VCO_DIGITAL_MAX 255 * V_OUT_MAX / V_REF
-#define VCO_DIGITAL_INC 5
-
-// SPI Functions codes
-#define R_DEFAULT 0x3007
-#define R_ENABLE_PA 0x60
-#define R_DISABLE_PA 0x1060
-
+#define PIN_NUMBER 4
 #define AVERAGE 2
 
-unsigned int doppler_div = 44; // 44.44
+#define DAC_ADDR 0x60
+#define DAC_VREF 3.26
+#define DAC_RES 4096
+
+#define RADAR_VMAX 3
+#define RADAR_MIN 0
+#define RADAR_SPI_CS 12
+#define RADAR_SPI_SIGNAL_DEFAULT 0x3007
+#define RADAR_SPI_CLOCK 1250000
+
+#define DAC_RADAR_MAX_VAL (RADAR_MAX / DAC_VREF * DAC_RES) - 1
+
+unsigned int doppler_div = 44;
 unsigned int samples[AVERAGE];
 unsigned int x;
+bool isRising = true;
 
-int digital = 0;
-double lfrq;
-long int pp;
-
-portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-
-// void IRAM_ATTR pulseInISR()
-// {
-
-//   if (GPIO.in & (1 << 15))
-//   {
-//     portENTER_CRITICAL_ISR(&mux);
-//     pulseDuration = esp_timer_get_time();
-//     portEXIT_CRITICAL_ISR(&mux);
-//     }
-//   else
-//   {
-//     if (pulseDuration > 0)
-//     {
-//       portENTER_CRITICAL_ISR(&mux);
-//       pulseDuration = esp_timer_get_time() - pulseDuration;
-//       freqency = 1000000 / pulseDuration;
-//       portEXIT_CRITICAL_ISR(&mux);
-//     }
-//   }
-// }
-volatile unsigned long interruptCounter = 0;
-volatile unsigned long lastInterruptTime = 0;
-
-void ISR()
-{
-  interruptCounter++;
-}
+Adafruit_MCP4725 dac;
 
 void setup()
 {
-
   Serial.begin(9600);
-  Serial.println("Initializing radar");
+  pinMode(PIN_NUMBER, INPUT);
 
-  pinMode(SS_PIN, OUTPUT);
-  digitalWrite(SS_PIN, LOW);
-
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  SPI.beginTransaction(SPISettings(1250000, MSBFIRST, SPI_MODE0));
-  SPI.transfer(R_DEFAULT);
-  SPI.endTransaction();
-
-  digitalWrite(SS_PIN, HIGH);
-
-  Serial.println("Radar initialized");
-
-  pinMode(PIN_I1, INPUT);
-  attachInterrupt(digitalPinToInterrupt(PIN_I1), ISR, RISING);
-  sei();
+  initRadar();
+  initDAC();
 }
 
 void loop()
 {
-
-  if (interruptCounter > 0)
+  noInterrupts();
+  pulseIn(PIN_NUMBER, HIGH);
+  unsigned int pulse_length = 0;
+  for (x = 0; x < AVERAGE; x++)
   {
-    portENTER_CRITICAL_ISR(&mux);
-    unsigned long currentTime = micros();
-    float frequency = (float)interruptCounter / (float)(currentTime - lastInterruptTime) * 1000000.0;
-    portEXIT_CRITICAL_ISR(&mux);
-    float speed = frequency / doppler_div;
-    if (speed > 5 && speed < 300)
-    {
-      Serial.print("\r\n");
-      Serial.print(frequency);
-      Serial.print("Hz : ");
-      Serial.print(speed);
-      Serial.println("km/h");
-    }
-
-    interruptCounter = 0;
-    lastInterruptTime = currentTime;
+    pulse_length = pulseIn(PIN_NUMBER, HIGH);
+    pulse_length += pulseIn(PIN_NUMBER, LOW);
+    samples[x] = pulse_length;
   }
+  interrupts();
+
+  // Check for consistency
+  bool samples_ok = true;
+  unsigned int nbPulsesTime = samples[0];
+  for (x = 1; x < AVERAGE; x++)
+  {
+    nbPulsesTime += samples[x];
+    if ((samples[x] > samples[0] * 2) || (samples[x] < samples[0] / 2))
+    {
+      samples_ok = false;
+    }
+  }
+
+  if (samples_ok)
+  {
+    unsigned int Ttime = nbPulsesTime / AVERAGE;
+    unsigned int Freq = 1000000 / Ttime;
+
+    Serial.print(Ttime);
+    Serial.print("\r\n");
+    Serial.print(Freq);
+    Serial.print("Hz : ");
+    Serial.print(Freq / doppler_div);
+    Serial.print("km/h\r\n");
+
+    delay(200);
+  }
+}
+
+void initRadar()
+{
+  pinMode(RADAR_SPI_CS, OUTPUT);
+  digitalWrite(RADAR_SPI_CS, LOW);
+  SPI.beginTransaction(SPISettings(RADAR_SPI_CLOCK, MSBFIRST, SPI_MODE0));
+  SPI.transfer(RADAR_SPI_SIGNAL_DEFAULT);
+  SPI.endTransaction();
+  digitalWrite(RADAR_SPI_CS, HIGH);
+  Serial.println("SPI transfered");
+}
+
+void initDAC()
+{
+  dac.begin(DAC_ADDR);
+  // set voltage to 0V
+  dac.setVoltage(0, false);
 }
